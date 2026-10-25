@@ -22,6 +22,9 @@ import {
   getTransferCheckedInstruction,
 } from "@solana-program/token";
 import { loadAgentSigner } from "../lib/payments/client";
+import { createHash } from "node:crypto";
+
+const MEMO_PROGRAM = address("MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr");
 
 try {
   process.loadEnvFile(".env.local");
@@ -46,17 +49,51 @@ console.log("Team wallet:", signer.address);
 const me = await account(signer.address);
 console.log("SOL balance:", me ? Number(me.lamports) / 1e9 : 0);
 
-const [record] = await getProgramDerivedAddress({ programAddress: PROGRAM, seeds: ["claim", CHALLENGE_ID] });
-console.log("Record PDA:", record, `(seeds: "claim", "${CHALLENGE_ID}")`);
-const rec = await account(record);
-if (!rec) {
-  console.error("No record at that address yet. The organisers may not have set up our puzzle (wallet registered late).");
+// Try every plausible way the salt could combine with "claim" and the Challenge ID.
+const SALT = "830797a34fd3";
+const saltBytes = Uint8Array.from(Buffer.from(SALT, "hex"));
+const ids = [CHALLENGE_ID, CHALLENGE_ID.toUpperCase()];
+const candidates: { label: string; seeds: (string | Uint8Array)[] }[] = [];
+for (const id of ids) {
+  candidates.push(
+    { label: `claim|${id}`, seeds: ["claim", id] },
+    { label: `claim|salt(str)|${id}`, seeds: ["claim", SALT, id] },
+    { label: `claim|${id}|salt(str)`, seeds: ["claim", id, SALT] },
+    { label: `claim|salt(hex)|${id}`, seeds: ["claim", saltBytes, id] },
+    { label: `claim|${id}|salt(hex)`, seeds: ["claim", id, saltBytes] },
+    { label: `claim|${id}${SALT}`, seeds: ["claim", id + SALT] },
+    { label: `claim|${SALT}${id}`, seeds: ["claim", SALT + id] },
+    { label: `claim${SALT}|${id}`, seeds: ["claim" + SALT, id] },
+    { label: `claim|${id}:${SALT}`, seeds: ["claim", `${id}:${SALT}`] },
+    { label: `claim|${SALT}:${id}`, seeds: ["claim", `${SALT}:${id}`] },
+  );
+}
+let record: Awaited<ReturnType<typeof getProgramDerivedAddress>>[0] | null = null;
+let rec: Awaited<ReturnType<typeof account>> = null;
+for (const c of candidates) {
+  const [pda] = await getProgramDerivedAddress({ programAddress: PROGRAM, seeds: c.seeds });
+  const a = await account(pda);
+  const ok = a && a.owner === PROGRAM;
+  console.log(`${ok ? "FOUND" : "  -  "} ${c.label} -> ${pda}${a ? ` (owner ${a.owner}, ${a.data.length} bytes)` : ""}`);
+  if (ok && !record) {
+    record = pda;
+    rec = a;
+  }
+}
+if (!record || !rec) {
+  console.error("No record found under any seed combination. The organisers may not have set up our puzzle yet.");
   process.exit(1);
 }
+console.log("Using record:", record);
 const view = new DataView(rec.data.buffer, rec.data.byteOffset, rec.data.byteLength);
 const nonce = view.getBigUint64(41, true);
 const clearance = getAddressDecoder().decode(rec.data.slice(49, 81));
 console.log("Record length:", rec.data.length, "| clearance nonce:", nonce.toString(), "| clearance account:", clearance);
+
+// Challenge 2 (Operation · Exact): pay exactly 1000 + (nonce mod 9000) base units. Challenge 1: any amount (1).
+const EXACT = process.argv.includes("--exact");
+const AMOUNT = EXACT ? 1000n + (nonce % 9000n) : 1n;
+console.log(EXACT ? `Exact clearance fee: 1000 + (${nonce} mod 9000) = ${AMOUNT} base units` : "Amount: 1 base unit");
 
 const mint = await account(CRED_MINT);
 if (!mint) throw new Error("CRED mint not found");
@@ -83,10 +120,21 @@ if (clr && clr.owner === tokenProgram) {
 }
 instructions.push(
   getTransferCheckedInstruction(
-    { source, mint: CRED_MINT, destination, authority: signer, amount: 1n, decimals },
+    { source, mint: CRED_MINT, destination, authority: signer, amount: AMOUNT, decimals },
     { programAddress: tokenProgram },
   ),
 );
+
+// Challenge 3 (Operation · Verified): same transaction carries an SPL Memo =
+// first 16 hex chars of sha256(utf8(Challenge ID) || nonce as 8 little-endian bytes).
+if (process.argv.includes("--memo")) {
+  const idForMemo = process.argv.includes("--lower") ? CHALLENGE_ID : (process.env.CHALLENGE_ID ?? "T-98b27127");
+  const nonceLE = Buffer.alloc(8);
+  nonceLE.writeBigUInt64LE(nonce);
+  const memo = createHash("sha256").update(Buffer.concat([Buffer.from(idForMemo, "utf8"), nonceLE])).digest("hex").slice(0, 16);
+  console.log(`Memo: sha256("${idForMemo}" || ${nonceLE.toString("hex")}) [:16] = ${memo}`);
+  instructions.push({ programAddress: MEMO_PROGRAM, accounts: [], data: new Uint8Array(Buffer.from(memo, "utf8")) });
+}
 
 if (!SEND) {
   console.log("\nDry run only. Re-run with --send to submit the transfer.");

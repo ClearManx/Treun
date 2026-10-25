@@ -9,3 +9,6 @@ next-env.d.ts
 .env.local
 .env.*.local
 *.keypair.json
+
+# Treun local order log
+/data/

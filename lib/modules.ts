@@ -10,6 +10,18 @@ export interface StudioModule {
 
 export const modules: StudioModule[] = [
   {
+    "id": "treun",
+    "name": "Treun ordering",
+    "href": "/treun",
+    "summary": "Buyer agent orders from verified suppliers, checks licences and budget, and pays in USDC on Solana devnet."
+  },
+  {
+    "id": "treun-audit",
+    "name": "Treun audit ledger",
+    "href": "/treun/audit",
+    "summary": "Every paid and refused order, with links to the on-chain transactions."
+  },
+  {
     "id": "payments",
     "name": "Internet-Native Payments (x402 V2, Solana devnet)",
     "summary": "Charge for API routes with x402 V2 and pay for them with a devnet wallet. Test money only."
